@@ -22,7 +22,8 @@ label-x/
 ├── backend/        FastAPI app (config, logging, routes)
 ├── frontend/        Streamlit dashboard
 ├── schemas/         Shared Pydantic schemas (backend + frontend + tests)
-├── vision/ ocr/ rules/ rag/ database/ services/   Empty — future phases
+├── database/        SQLAlchemy models, Alembic migrations, PostgreSQL config
+├── vision/ ocr/ rules/ rag/ services/   Empty — future phases
 ├── tests/           Pytest tests
 ├── deployment/       Dockerfiles + docker-compose.yml
 ├── docs/            Architecture, rule plan, project status
@@ -85,14 +86,38 @@ docker compose -f deployment/docker-compose.yml --env-file .env up --build
 
 - Backend: http://localhost:8000/health
 - Frontend: http://localhost:8501
+- Database: postgres+pgvector on localhost:5432 (see below)
+
+## Database (Phase 2)
+
+PostgreSQL + pgvector, via SQLAlchemy and Alembic. No OCR/AI/RAG logic reads
+or writes these tables yet — this phase only provisions the schema described
+in `docs/ARCHITECTURE.md` §8.
+
+```bash
+cp .env.example .env    # then set a real POSTGRES_PASSWORD
+
+# Start Postgres only (pgvector-enabled image)
+docker compose -f deployment/docker-compose.yml --env-file .env up -d db
+
+# Apply migrations
+alembic upgrade head
+
+# Or, for quick local/demo use instead of Alembic:
+python -m database.init_db
+
+# Optional: seed a demo inspector user
+python -m database.seed
+```
+
+See `docs/PROJECT_STATUS.md` for the full table list, design decisions, and
+verification commands.
 
 ## Configuration
 
 All configuration is via environment variables — see `.env.example` for the
 full list. Nothing is hardcoded, and no real secrets should ever be
-committed. Variables under the "NOT used yet" section of `.env.example` are
-placeholders for later phases (database, AI vision service, RAG) and have no
-effect yet.
+committed.
 
 ## Development principles
 
