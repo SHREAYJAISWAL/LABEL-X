@@ -1,198 +1,147 @@
-# LABEL-X — Architecture
+# Architecture Design Document: LABEL-X
 
-Smart India Hackathon 2026 · Problem Statement ID 26034 · Team AI Alchemist (Team ID 3179)
+## 1. System Overview & Core Design Philosophy
 
-## 1. Purpose
+LABEL-X is architected around a non-negotiable architectural invariant:
+**Strict Decoupling of Probabilistic Perception from Deterministic Regulatory Verification.**
 
-LABEL-X is an **inspection-assistance and preliminary screening system** for checking
-packaged-commodity labels against the *Legal Metrology (Packaged Commodities) Rules,
-2011*. It is not, and must never present itself as, an automated legal authority. Final
-compliance determination always rests with a human Legal Metrology inspector.
+In regulatory compliance screening, models that combine image perception and legal interpretation into an end-to-end black box (e.g., prompting a multimodal LLM to decide "Is this package legal?") are unacceptable for the following reasons:
+1. **Hallucination Risk**: Large generative models frequently hallucinate legal standards or misread fractional numbers.
+2. **Lack of Verifiability**: Regulators and legal departments require statutory citations and mathematical determinism, not probabilistic prose.
+3. **Auditability**: If a package is cited for a non-compliance penalty, the decision must withstand judicial scrutiny with a verifiable chain of custody from pixel coordinates to statutory clause.
 
-## 2. Core principle
+Therefore, LABEL-X enforces a clear **Perception-Verification Boundary**:
+- **Perception Pipeline (CV / OCR / Extraction)**: Converts raw, unstructured 2D pixels into structured semantic candidate objects with associated spatial coordinates and confidence scores. This phase is probabilistic and fallible.
+- **Verification Core (Rule Engine)**: Pure, zero-side-effect, deterministic Python rule functions that evaluate strongly-typed Pydantic schemas against statutory constraints. Given identical structured inputs, the rule engine **always** produces the exact same boolean outcome and citation trail.
 
-```
-AI extracts and interprets.
-RAG retrieves.
-Deterministic rules validate.
-Humans decide.
-```
+---
 
-Each stage is a separate, independently testable concern:
-
-| Concern | Owner | Never does |
-|---|---|---|
-| Reading the label (OCR + vision) | `ocr/`, `vision/` | Never decides compliance |
-| Structuring what was read | `schemas/` (Pydantic) | Never validates against law |
-| Finding the applicable provision | `rag/` | Never issues a final finding |
-| Applying the provision | `rules/` (deterministic engine) | Never guesses when evidence is weak |
-| Judging the result | Human inspector | — |
-
-## 3. Three-state result model
-
-Every screening resolves to exactly one of:
-
-1. **NO OBVIOUS ISSUE** — declaration(s) detected, legible, and satisfy the applicable
-   rule as currently in force.
-2. **NEEDS REVIEW** — OCR/vision confidence is low, category or applicability is
-   ambiguous, the rule/version status is uncertain, or evidence is otherwise
-   insufficient to decide either way.
-3. **POTENTIAL NON-COMPLIANCE** — only produced when *all* of the following hold:
-   - the rule is applicable to this package/category/context,
-   - the rule (or the specific sub-rule/proviso) is confirmed **active** as of the
-     relevant date (not withdrawn/superseded),
-   - there is sufficient extraction evidence to evaluate the condition,
-   - the condition can be evaluated **deterministically** (no LLM judgment call),
-   - the evidence positively supports the finding.
-
-If any precondition for state 3 is not met, the system must fall back to
-**NEEDS REVIEW**, never silently assume compliance and never silently assume violation.
-
-## 4. Technology stack
-
-| Layer | Technology | Role |
-|---|---|---|
-| Frontend | Streamlit | Inspector-facing prototype UI: upload, review, evidence viewer, override, report |
-| Backend / orchestration | FastAPI (Python) | Coordinates the pipeline as modular services |
-| Image processing | OpenCV | Quality checks, preprocessing, panel detection |
-| OCR | PaddleOCR | Text + bounding boxes + per-token confidence |
-| Vision / semantic understanding | Multimodal vision model | Layout & field understanding (interprets, does not decide) |
-| Structured output | Pydantic | Typed schema for every extracted declaration field |
-| Regulatory knowledge | PostgreSQL + pgvector | Versioned rule text + embeddings for retrieval |
-| Validation | Deterministic Python rule engine | The only component allowed to produce a finding |
-| Deployment | Docker / docker-compose | Local/SIH-demo deployment, no k8s/Kafka/microservices |
-
-## 5. Core pipeline
+## 2. High-Level Architecture
 
 ```
-Package Image
-  → Image Quality Check
-  → OpenCV Preprocessing
-  → Panel Detection
-  → PaddleOCR                      (text, bounding boxes, confidence)
-  → Multimodal Field Extraction    (semantic/layout interpretation)
-  → Pydantic Validation            (structural validation of AI output only)
-  → Product/Package Classification (category, retail vs wholesale, applicability signals)
-  → Applicability Engine           (which chapter/rules apply to this package)
-  → Regulatory RAG                 (retrieves candidate rule text/version, does NOT decide)
-  → Deterministic Rule Engine      (the only component that produces a finding)
-  → Evidence Generation            (binds finding to image region + OCR span + rule id)
-  → Three-State Result
-  → Human Inspector Review / Override
-  → Audit Trail / Report
+[Raw Package Image]
+        |
+        v
++-------------------------------------------------------------+
+| LAYER 1: Image Quality Assessment & Preprocessing            |
+| (OpenCV Headless: Blur, Glare, Skew, Resolution)            |
++-------------------------------------------------------------+
+        |
+        | Preprocessed Image + Quality Assessment
+        v
++-------------------------------------------------------------+
+| LAYER 2: Optical Character Recognition (OCR) Engine          |
+| (PyTesseract: Word/Line Tokenization, Bounding Boxes, Conf) |
++-------------------------------------------------------------+
+        |
+        | OCR Tokens + Bounding Boxes + Confidence Scores
+        v
++-------------------------------------------------------------+
+| LAYER 3: Entity Extraction & Structured Field Parsing        |
+| (Regex, Spatial Layout Heuristics, Pattern Analyzers)        |
++-------------------------------------------------------------+
+        |
+        | Raw Extracted Entities
+        v
+===============================================================
+==== PERCEPTION / VERIFICATION BOUNDARY (Canonical Schema) ====
+===============================================================
+        |
+        | Strongly-Typed Pydantic Regulatory Input Models
+        v
++-------------------------------------------------------------+
+| LAYER 4: Deterministic Compliance Rule Engine                |
+| (Pure Python: Metric Units, MRP Format, USP Math, Dates)     |
++-------------------------------------------------------------+
+        |
+        | Rule Execution Verdicts + Statutory Citations
+        v
++-------------------------------------------------------------+
+| LAYER 5: Evidence Synthesizer & Decision Engine              |
+| (3-State Output: NO_OBVIOUS_ISSUE / NEEDS_REVIEW / VIOLATION)|
++-------------------------------------------------------------+
+        |
+        | Auditable Compliance Dossier (JSON)
+        v
++-------------------------------------------------------------+
+| LAYER 6: Persistence & Presentation (Streamlit / API)        |
+| (Visual Bounding Box Overlay, Inspector Review, CSV/JSON)    |
++-------------------------------------------------------------+
 ```
 
-### Evidence-first traceability
+---
 
-Every finding must be traceable end-to-end:
+## 3. Detailed Component Breakdown
 
-```
-IMAGE → OCR → EXTRACTED FIELD → APPLICABLE RULE → VALIDATION → FINDING → EVIDENCE
-```
+### 3.1 `src/image_quality/` (Image Quality Gate)
+- **Role**: Determine if an uploaded image has sufficient perceptual fidelity to be reliably processed by the OCR engine.
+- **Key Metrics**:
+  - *Sharpness / Focus*: Variance of the Laplacian ($\sigma^2_{\text{Laplacian}}$). If below threshold, image is flagged as blurry.
+  - *Illumination & Specular Glare*: Histograms for over-exposure saturation and deep shadows.
+  - *Resolution & Aspect Ratio*: Validates DPI adequacy and pixel dimensions for text legibility.
+- **Behavior**: If the image fails critical quality thresholds, the pipeline does not guess; it immediately emits `NEEDS_REVIEW` with an `ImageQualityWarning`.
 
-No unexplained compliance scores. No finding without a linked bounding box, OCR
-source, rule id/version, and the extracted field(s) it was evaluated against.
+### 3.2 `src/ocr/` (Optical Character Recognition)
+- **Role**: Execute OCR extraction using lightweight, CPU-compatible engines (`pytesseract` / Tesseract OCR).
+- **Output Structure**: Emits a token stream where every token has:
+  - `text`: Extracted string.
+  - `bbox`: Absolute pixel coordinates `(x, y, w, h)`.
+  - `confidence`: Confidence score from $0.0$ to $100.0$.
+  - `line_num`, `block_num`: Hierarchical spatial layout markers.
 
-## 6. Declaration schema (Pydantic)
+### 3.3 `src/extraction/` (Entity & Field Extraction)
+- **Role**: Transform noisy OCR tokens into candidate regulatory fields:
+  - `net_quantity`: Quantity magnitude, unit symbol, multi-pack indicators.
+  - `mrp`: Currency symbol, numeric value, tax qualifier ("incl. of all taxes").
+  - `unit_sale_price`: Declared unit price, unit denominator.
+  - `dates`: Month and year of manufacture/packing/import.
+  - `consumer_care`: Phone, email, postal address, designation.
+  - `manufacturer_details`: Manufacturer/packer names, addresses, pin codes.
+- **Confidence Computation**: Extracts aggregate confidence based on constituent OCR token scores and regex match fidelity.
 
-Every declaration record supports:
+### 3.4 `src/regulatory/` (Canonical Data Contracts)
+- **Role**: Houses immutable Pydantic models serving as the contract between perception and deterministic verification.
+- **Core Entities**:
+  - `ScannedLabelData`: Normalized representation of all parsed fields.
+  - `QuantityDeclaration`: Structured representation of numerical quantity and unit.
+  - `PriceDeclaration`: MRP, currency, tax clause status.
+  - `UnitSalePriceDeclaration`: Declared USP value, denominator unit, verified match.
+  - `DateDeclaration`: Month, year, date type (mfg, packed, import).
+  - `ConsumerCareDeclaration`: Contact channels and validity flags.
 
-- `commodity_name`
-- `manufacturer`, `packer`, `importer`
-- `net_quantity_value`, `net_quantity_unit`
-- `mrp`
-- manufacture / packing / import month-year (as applicable to the package type)
-- `consumer_complaint_contact`
-- `dimensions` (where applicable — e.g. Rule 14/15 style commodities)
-- `other_declarations` (open-ended, for provisions not yet modeled as first-class fields)
+### 3.5 `src/rules/` (Deterministic Rule Engine)
+- **Role**: Collection of pure Python functions implementing statutory constraints.
+- **Rule Signature**:
+  ```python
+  def verify_rule_xxx(label_data: ScannedLabelData) -> RuleResult:
+      ...
+  ```
+- **Key Rule Sets**:
+  - `rule_net_quantity_units`: Enforces standard SI symbols (`g`, `kg`, `ml`, `l`, `m`, `cm`, `N`, `U`). Explicitly rejects `gms`, `Kgs`, `ML`, etc.
+  - `rule_mrp_tax_inclusive`: Enforces presence of `"inclusive of all taxes"` or statutory abbreviations.
+  - `rule_unit_sale_price_presence`: Verifies presence of USP for packages subject to GSR 779(E).
+  - `rule_unit_sale_price_math`: Checks mathematical consistency: $|USP_{\text{declared}} - (MRP / NetQty)| \le \epsilon$.
+  - `rule_date_validity`: Validates month/year formatting and rejects impossible future dates.
+  - `rule_consumer_care_completeness`: Validates presence of at least phone/email + postal address.
 
-Every individual extracted field additionally retains:
+### 3.6 `src/evidence/` (Evidence & Audit Binding)
+- **Role**: Binds visual bounding boxes, cropped image patches, raw OCR snippets, and rule evaluation traces into a tamper-evident audit record.
+- **Data Integrity**: Computes cryptographic checksums (SHA-256) of input images and rule configurations to ensure complete audit reproducibility.
 
-- `value`
-- `present: bool` (present / not present, independent of value confidence)
-- `confidence: float`
-- `evidence_bbox` (bounding box on the source image/panel)
-- `source_image_or_panel`
-- `ocr_text` (raw OCR string backing the interpreted value, when applicable)
+### 3.7 `src/decisions/` (Decision Synthesizer)
+- **Role**: Aggregates individual `RuleResult` outputs and image quality scores to produce the top-level Three-State Verdict:
+  - `NO_OBVIOUS_ISSUE`: All mandatory rules passed; OCR confidence $\ge \tau_{\text{conf}}$; Image quality acceptable.
+  - `NEEDS_REVIEW`: Image degraded, low OCR confidence, ambiguous field formatting, or missing field on partial-panel capture.
+  - `POTENTIAL_NON_COMPLIANCE`: At least one deterministic statutory rule returned a failure verdict.
 
-This lets the rule engine and the human reviewer independently verify *why* a field
-was extracted the way it was, without re-running AI.
+### 3.8 `src/storage/` (Session & Persistence Layer)
+- **Role**: Lightweight local persistence for screening results, run sessions, and audit exports (JSON / CSV). Zero external database dependency required for single-node CPU operation.
 
-## 7. Regulatory versioning
+---
 
-The source PDF (*Legal Metrology (Packaged Commodities) Rules, 2011*, notified
-7 March 2011, in force from 1 April 2011) contains provisions that were later amended
-or withdrawn — notably via **GSR 748(E) dated 24.10.2011** (effective 01.07.2012) and
-**GSR 734(E) dated 30.09.2011**. A rule is not a single static fact; it is a
-**version-dated fact**. The `rules/` module and the `regulatory_rules` /
-`rule_versions` tables must record, for every provision used in validation:
+## 4. Architectural Invariants & Constraints
 
-- rule number and sub-rule/clause reference,
-- the schedule it depends on (if any),
-- effective-from date,
-- effective-to date or `withdrawn`/`amended` status with the citation (GSR number,
-  date),
-- the exact text or paraphrase actually enforced by the deterministic engine.
-
-The rule engine must resolve "which version of this rule applies **today**" (or at a
-configurable as-of date) before evaluating any declaration. See
-`docs/RULE_IMPLEMENTATION_PLAN.md` for the specific provisions in scope and their
-version status as currently understood from the supplied PDF.
-
-## 8. Database (target schema, built incrementally)
-
-`users`, `screenings`, `images`, `ocr_results`, `declarations`, `regulatory_rules`,
-`rule_versions`, `validation_results`, `evidence`, `audit_logs`.
-
-Tables are added as the phase that needs them is implemented — not all at once.
-
-## 9. Project structure
-
-```
-label-x/
-├── backend/       FastAPI app: routes, orchestration of the pipeline stages
-├── frontend/       Streamlit app: upload, review, evidence, override, report UI
-├── vision/         Multimodal field-extraction client + prompt/schema glue
-├── ocr/            PaddleOCR wrapper: text + bounding boxes + confidence
-├── schemas/         Pydantic models: declarations, extracted fields, results
-├── rules/          Deterministic rule engine + versioned rule definitions (data, not prose)
-├── rag/             Regulatory retrieval: embeddings, pgvector queries, candidate rule lookup
-├── database/        SQLAlchemy models / migrations for the schema in §8
-├── services/         Cross-cutting glue: applicability engine, classification, orchestration helpers
-├── data/            Demo/test fixtures (sample label images, expected outputs) — clearly marked as demo data
-├── tests/           Unit tests, one set per deterministic rule at minimum
-├── docs/            This file, PROJECT_STATUS.md, RULE_IMPLEMENTATION_PLAN.md
-├── deployment/       Dockerfiles, docker-compose.yml
-├── requirements.txt
-├── .env.example
-└── README.md
-```
-
-## 10. Design principles carried through every phase
-
-1. Work in phases; inspect the repo and `docs/PROJECT_STATUS.md` before each one.
-2. Never rewrite working code unnecessarily; keep modules small.
-3. No Kubernetes, Kafka, microservices, or other infra beyond Docker/docker-compose.
-4. Secrets only via environment variables (`.env`, never hardcoded).
-5. Pydantic validates AI output; it does not validate legal compliance.
-6. Every deterministic rule ships with tests.
-7. AI extraction, RAG retrieval, and rule validation stay in separate modules — never
-   let the LLM or RAG layer produce or influence the final finding directly.
-8. Every important result carries its evidence.
-9. External AI service failures are handled gracefully (fallback to demo/cached data
-   with a clear on-screen indication) — the app must never crash.
-10. When automated determination isn't reliable, the result is NEEDS REVIEW.
-11. No fake accuracy statistics, no invented legal requirements, no legal-certification
-    claims anywhere in the UI or reports.
-
-## 11. Demo scope
-
-Primary categories: **Biscuits, Tea, Soap, Cereals/Pulses, Salt** — chosen because they
-are explicitly listed in the Second Schedule (standard package sizes) and give
-coverage across food, non-food, and different unit-of-measure conventions.
-
-Demo must show: upload → quality check → OCR → declaration extraction → evidence
-(bounding boxes) → category/context determination → applicable-rule retrieval →
-deterministic validation → three-state result → evidence drill-down → inspector
-review/override → report generation — with graceful fallback to clearly-labeled
-demo/cached data if the external AI service is unavailable.
+1. **CPU Execution Only**: All algorithms, image transforms, and regex pipelines must run efficiently on standard x86_64 CPU cores without requiring CUDA or GPU acceleration.
+2. **Stateless Rule Verification**: Rules cannot depend on external API lookups or stateful databases; all decisions are pure functions of the provided input data.
+3. **No Silent Failures**: If OCR fails or an image is too blurry, the system must not emit a false pass; it must explicitly degrade to `NEEDS_REVIEW`.
+4. **Traceable Citations**: Every non-compliance finding must provide the statutory rule number (e.g., `Rule 6(1)(c)`, `GSR 779(E)`), the exact offending text, and bounding box coordinates.
